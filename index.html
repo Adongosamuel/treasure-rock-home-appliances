@@ -1,0 +1,914 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Treasure Rock Home Appliances - Management System</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.auth0.com/js/auth0-spa-js/2.1/auth0-spa-js.production.js"></script>
+    <script src="auth-config.js"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        @media print {
+            body * { visibility: hidden; }
+            #printable-receipt, #printable-receipt * { visibility: visible; }
+            #printable-receipt {
+                display: block !important;
+                position: absolute;
+                left: 0;
+                top: 0;
+                width: 80mm;
+                padding: 10px;
+                margin: 0;
+                font-family: 'Courier New', Courier, monospace;
+            }
+            .no-print { display: none !important; }
+        }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #f1f5f9; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    </style>
+</head>
+<body class="bg-slate-100 text-slate-800 antialiased min-h-screen flex flex-col">
+    <div id="toast-container" class="fixed top-5 right-5 z-50 flex flex-col gap-2 pointer-events-none"></div>
+    <div id="app" class="flex-grow flex flex-col"></div>
+    <div id="printable-receipt" class="hidden bg-white text-black p-4 text-xs"></div>
+    <script>
+        const DEFAULT_STORE = {
+            name: "Treasure Rock Home Appliances",
+            address: "Bongo Namoo, Upper East Region, Ghana",
+            phone: "+233 54 498 4996 / +233 59 277 7166",
+            email: "sales@treasurerock.com",
+            currency: "GH₵",
+            taxRate: 0
+        };
+
+        const INITIAL_PRODUCTS = [
+            { id: "PROD-101", name: 'Double Door Refrigerator 250L', category: "Refrigerators", price: 4200, cost: 3400, stock: 8, minStock: 2 },
+            { id: "PROD-102", name: 'Smart TV 55" 4K UHD', category: "Televisions", price: 5500, cost: 4500, stock: 12, minStock: 3 },
+            { id: "PROD-103", name: 'Front Load Washing Machine 8kg', category: "Washing Machines", price: 4800, cost: 3900, stock: 5, minStock: 2 },
+            { id: "PROD-104", name: 'Microwave Oven 25L Digital', category: "Microwaves", price: 1200, cost: 850, stock: 15, minStock: 5 },
+            { id: "PROD-105", name: 'Stand Fan 16" with Remote', category: "Fans & Cooling", price: 450, cost: 280, stock: 25, minStock: 8 },
+            { id: "PROD-106", name: 'Gas Cooker 4 Burners + Oven', category: "Cookers", price: 3100, cost: 2400, stock: 6, minStock: 2 },
+            { id: "PROD-107", name: 'Blender with Grinder Mill 1.5L', category: "Small Appliances", price: 320, cost: 190, stock: 30, minStock: 10 }
+        ];
+
+        function loadStoredValue(key, fallback, isValid) {
+            const storedValue = localStorage.getItem(key);
+            if (storedValue === null) return fallback;
+            try {
+                const parsedValue = JSON.parse(storedValue);
+                if (isValid(parsedValue)) return parsedValue;
+            } catch (error) {
+                console.warn(`Ignoring invalid saved data for "${key}".`, error);
+            }
+            return fallback;
+        }
+
+        let state = {
+            authenticated: false,
+            user: null,
+            role: null,
+            auth0Client: null,
+            accessToken: null,
+            activeTab: 'pos',
+            applications: [],
+            applicationsLoading: false,
+            applicationsError: '',
+            products: loadStoredValue('tr_products', INITIAL_PRODUCTS, Array.isArray),
+            sales: loadStoredValue('tr_sales', [], Array.isArray),
+            settings: {
+                ...DEFAULT_STORE,
+                ...loadStoredValue('tr_settings', DEFAULT_STORE, value => value && typeof value === 'object' && !Array.isArray(value))
+            },
+            cart: [],
+            searchQuery: '',
+            categoryFilter: 'All'
+        };
+
+        function saveState() {
+            localStorage.setItem('tr_products', JSON.stringify(state.products));
+            localStorage.setItem('tr_sales', JSON.stringify(state.sales));
+            localStorage.setItem('tr_settings', JSON.stringify(state.settings));
+        }
+
+        function showToast(message, type = 'success') {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            const bgClass = type === 'success' ? 'bg-emerald-600' : type === 'error' ? 'bg-rose-600' : 'bg-slate-800';
+            toast.className = `${bgClass} text-white px-4 py-3 rounded-lg shadow-lg flex items-center gap-3 transition-all duration-300 transform translate-y-2 pointer-events-auto`;
+            toast.innerHTML = `
+                <i class="fa-solid ${type === 'success' ? 'fa-circle-check' : type === 'error' ? 'fa-triangle-exclamation' : 'fa-circle-info'} text-lg"></i>
+                <span class="text-sm font-medium">${message}</span>
+            `;
+            container.appendChild(toast);
+            setTimeout(() => {
+                toast.classList.add('opacity-0', '-translate-y-2');
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        }
+
+        function render() {
+            const app = document.getElementById('app');
+            if (!state.authenticated) {
+                app.innerHTML = renderLogin();
+                return;
+            }
+            app.innerHTML = `
+                ${renderHeader()}
+                <main class="flex-grow container mx-auto p-4 sm:p-6 flex flex-col gap-6">
+                    ${renderNavigation()}
+                    <div class="flex-grow">
+                        ${state.activeTab === 'pos' ? renderPOS() : ''}
+                        ${state.activeTab === 'inventory' ? renderInventory() : ''}
+                        ${state.activeTab === 'sales' ? renderSales() : ''}
+                        ${state.activeTab === 'settings' ? renderSettings() : ''}
+                        ${state.activeTab === 'hire-purchase' ? renderHirePurchase() : ''}
+                    </div>
+                </main>
+                ${renderFooter()}
+            `;
+        }
+
+        function renderLogin() {
+            return `
+                <div class="min-h-screen flex items-center justify-center bg-slate-900 p-4">
+                    <div class="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md border border-slate-200">
+                        <div class="text-center mb-8">
+                            <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-blue-100 text-blue-600 text-3xl mb-4">
+                                <i class="fa-solid fa-store"></i>
+                            </div>
+                            <h1 class="text-2xl font-bold text-slate-900">Treasure Rock</h1>
+                            <p class="text-slate-500 text-sm mt-1">Home Appliances Management System</p>
+                        </div>
+                        <form onsubmit="handleLogin(event)" class="space-y-5">
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-600 uppercase mb-2" for="username">Username</label>
+                                <div class="relative">
+                                    <i class="fa-solid fa-user absolute left-3 top-3.5 text-slate-400 text-sm"></i>
+                                    <input type="text" id="username" required autocomplete="username" placeholder="Enter your username"
+                                        class="w-full pl-10 pr-4 py-2.5 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-transparent text-sm">
+                                </div>
+                            </div>
+                            <p id="login-error" class="hidden text-sm text-rose-600" role="alert"></p>
+                            <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 rounded-lg shadow-md hover:shadow-lg transition-all text-sm flex items-center justify-center gap-2">
+                                <i class="fa-solid fa-right-to-bracket"></i> Continue to Sign In
+                            </button>
+                            <p class="text-xs text-center text-slate-500">Enter your username, then sign in with your username and password on the secure Auth0 page.</p>
+                        </form>
+                        <div class="mt-6 pt-4 border-t border-slate-100 text-center">
+                            <a href="apply.html" class="text-xs font-medium text-blue-600 hover:text-blue-700">Apply for Hire Purchase</a>
+                            <p class="text-xs text-slate-400 mt-2">Dashboard accounts are provided by an administrator.</p>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderHeader() {
+            return `
+                <header class="bg-slate-900 text-white shadow-md">
+                    <div class="container mx-auto px-4 sm:px-6 py-4 flex justify-between items-center">
+                        <div class="flex items-center gap-3">
+                            <div class="bg-blue-600 p-2.5 rounded-xl text-white">
+                                <i class="fa-solid fa-gem text-xl"></i>
+                            </div>
+                            <div>
+                                <h1 class="text-lg font-bold leading-none">${state.settings.name}</h1>
+                                <span class="text-xs text-slate-400">Management & POS Console</span>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-4">
+                            <div class="hidden sm:flex flex-col text-right">
+                                <span class="text-xs text-slate-400">Logged in as</span>
+                                <span class="text-sm font-semibold text-slate-200">${escapeHtml(state.user.name)}</span>
+                                <span class="text-xs text-slate-400 capitalize">${escapeHtml(state.role)}</span>
+                            </div>
+                            <button onclick="handleLogout()" class="bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white px-3.5 py-2 rounded-lg text-xs font-medium transition-all flex items-center gap-2">
+                                <i class="fa-solid fa-power-off text-rose-400"></i>
+                                <span class="hidden sm:inline">Logout</span>
+                            </button>
+                        </div>
+                    </div>
+                </header>
+            `;
+        }
+
+        function renderNavigation() {
+            const allTabs = [
+                { id: 'pos', name: 'Point of Sale (POS)', icon: 'fa-cart-shopping' },
+                { id: 'inventory', name: 'Stock & Inventory', icon: 'fa-boxes-stacked' },
+                { id: 'sales', name: 'Sales & Profits Ledger', icon: 'fa-chart-line' },
+                { id: 'settings', name: 'Store Settings', icon: 'fa-sliders' },
+                { id: 'hire-purchase', name: 'Hire Purchase', icon: 'fa-file-invoice-dollar' }
+            ];
+            const allowedTabIds = state.role === 'admin'
+                ? allTabs.map(tab => tab.id)
+                : state.role === 'staff'
+                    ? ['pos', 'inventory', 'sales', 'hire-purchase']
+                    : [];
+            const tabs = allTabs.filter(tab => allowedTabIds.includes(tab.id));
+            return `
+                <nav class="flex flex-wrap gap-2 bg-white p-2 rounded-xl border border-slate-200 shadow-sm">
+                    ${tabs.map(tab => `
+                        <button onclick="setActiveTab('${tab.id}')" 
+                            class="flex-1 min-w-[140px] px-4 py-2.5 rounded-lg text-sm font-semibold flex items-center justify-center gap-2 transition-all ${state.activeTab === tab.id ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100'}">
+                            <i class="fa-solid ${tab.icon}"></i>
+                            ${tab.name}
+                        </button>
+                    `).join('')}
+                </nav>
+            `;
+        }
+
+        function renderHirePurchase() {
+            if (state.applicationsLoading) {
+                return '<div class="bg-white p-8 rounded-xl border border-slate-200 text-center text-slate-500">Loading applications…</div>';
+            }
+            if (state.applicationsError) {
+                return `<div class="bg-rose-50 p-6 rounded-xl border border-rose-200 text-rose-700" role="alert">${escapeHtml(state.applicationsError)}</div>`;
+            }
+            if (state.applications.length === 0) {
+                return '<div class="bg-white p-8 rounded-xl border border-slate-200 text-center text-slate-500">No hire purchase applications have been submitted.</div>';
+            }
+
+            return `
+                <section class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                    <div class="p-5 border-b border-slate-200 flex flex-wrap justify-between items-center gap-3">
+                        <div>
+                            <h2 class="font-bold text-slate-900">Hire Purchase Applications</h2>
+                            <p class="text-sm text-slate-500 mt-1">${state.applications.length} application${state.applications.length === 1 ? '' : 's'}</p>
+                        </div>
+                        <button onclick="loadHirePurchaseApplications()" class="px-4 py-2 rounded-lg text-sm font-semibold text-blue-700 bg-blue-50 hover:bg-blue-100">
+                            <i class="fa-solid fa-rotate-right mr-1"></i> Refresh
+                        </button>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left text-sm">
+                            <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
+                                <tr><th class="px-5 py-3">Submitted</th><th class="px-5 py-3">Applicant</th><th class="px-5 py-3">Contact</th><th class="px-5 py-3">Product</th><th class="px-5 py-3">Details</th></tr>
+                            </thead>
+                            <tbody class="divide-y divide-slate-100">
+                                ${state.applications.map(application => {
+                                    const data = application.data || {};
+                                    const contact = [data.email, data.phone].filter(Boolean).map(escapeHtml).join('<br>');
+                                    const details = [
+                                        data.monthly_income ? `Income: ${escapeHtml(data.monthly_income)}` : '',
+                                        data.deposit ? `Deposit: ${escapeHtml(data.deposit)}` : '',
+                                        data.repayment_months ? `Term: ${escapeHtml(data.repayment_months)} months` : ''
+                                    ].filter(Boolean).join('<br>');
+                                    return `
+                                        <tr class="align-top">
+                                            <td class="px-5 py-4 whitespace-nowrap">${escapeHtml(application.created_at ? new Date(application.created_at).toLocaleString() : '—')}</td>
+                                            <td class="px-5 py-4 font-medium text-slate-900">${escapeHtml(data.full_name || '—')}<br><span class="text-xs font-normal text-slate-500">${escapeHtml(data.employer || '')}</span></td>
+                                            <td class="px-5 py-4">${contact || '—'}</td>
+                                            <td class="px-5 py-4">${escapeHtml(data.product || '—')}</td>
+                                            <td class="px-5 py-4">${details || '—'}</td>
+                                        </tr>
+                                    `;
+                                }).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            `;
+        }
+
+        function escapeHtml(value) {
+            return String(value).replace(/[&<>"']/g, character => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            })[character]);
+        }
+
+        function renderFooter() {
+            return `
+                <footer class="bg-white border-t border-slate-200 py-4 text-center text-xs text-slate-500">
+                    <p>&copy; ${new Date().getFullYear()} ${state.settings.name}. All rights reserved.</p>
+                </footer>
+            `;
+        }
+
+        function renderPOS() {
+            const categories = ['All', ...new Set(state.products.map(p => p.category))];
+            const filteredProducts = state.products.filter(p => {
+                const matchesCategory = state.categoryFilter === 'All' || p.category === state.categoryFilter;
+                const matchesSearch = p.name.toLowerCase().includes(state.searchQuery.toLowerCase()) || p.id.toLowerCase().includes(state.searchQuery.toLowerCase());
+                return matchesCategory && matchesSearch;
+            });
+            const cartTotal = state.cart.reduce((sum, item) => sum + (item.price * item.qty), 0);
+            const cartTax = cartTotal * (state.settings.taxRate / 100);
+            const grandTotal = cartTotal + cartTax;
+
+            return `
+                <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                    <div class="lg:col-span-7 flex flex-col gap-4">
+                        <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col sm:flex-row gap-3">
+                            <div class="relative flex-grow">
+                                <i class="fa-solid fa-magnifying-glass absolute left-3 top-3 text-slate-400 text-sm"></i>
+                                <input type="text" id="product-search" placeholder="Search product name or code..." value="${state.searchQuery}" oninput="updateSearch(this.value)"
+                                    class="w-full pl-9 pr-4 py-2 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-600 text-sm">
+                            </div>
+                            <select onchange="updateCategory(this.value)" class="py-2 px-3 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-600 text-sm bg-white">
+                                ${categories.map(c => `<option value="${c}" ${state.categoryFilter === c ? 'selected' : ''}>${c}</option>`).join('')}
+                            </select>
+                        </div>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 max-h-[600px] overflow-y-auto pr-1">
+                            ${filteredProducts.length === 0 ? `
+                                <div class="col-span-full bg-white p-8 rounded-xl border border-dashed border-slate-300 text-center text-slate-400">
+                                    <i class="fa-solid fa-box-open text-4xl mb-2"></i>
+                                    <p class="text-sm">No products found matching criteria</p>
+                                </div>
+                            ` : filteredProducts.map(p => `
+                                <div onclick="addToCart('${p.id}')" class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm hover:border-blue-500 hover:shadow-md transition-all cursor-pointer flex flex-col justify-between group">
+                                    <div>
+                                        <div class="flex justify-between items-start gap-2 mb-1">
+                                            <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">${p.category}</span>
+                                            <span class="text-xs px-2 py-0.5 rounded-full ${p.stock <= p.minStock ? 'bg-rose-100 text-rose-600 font-bold' : 'bg-emerald-100 text-emerald-700'} font-medium">
+                                                Stock: ${p.stock}
+                                            </span>
+                                        </div>
+                                        <h3 class="font-semibold text-slate-800 group-hover:text-blue-600 transition-colors text-sm mb-2">${p.name}</h3>
+                                    </div>
+                                    <div class="flex items-center justify-between mt-3 pt-3 border-t border-slate-100">
+                                        <span class="text-lg font-bold text-slate-900">${state.settings.currency} ${p.price.toLocaleString()}</span>
+                                        <button class="bg-blue-50 group-hover:bg-blue-600 text-blue-600 group-hover:text-white p-2 rounded-lg transition-all text-xs">
+                                            <i class="fa-solid fa-plus"></i> Add
+                                        </button>
+                                    </div>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+
+                    <div class="lg:col-span-5">
+                        <div class="bg-white rounded-xl border border-slate-200 shadow-sm flex flex-col h-full max-h-[700px]">
+                            <div class="p-4 border-b border-slate-200 flex justify-between items-center bg-slate-50 rounded-t-xl">
+                                <h2 class="font-bold text-slate-800 flex items-center gap-2">
+                                    <i class="fa-solid fa-receipt text-blue-600"></i> Current Order
+                                </h2>
+                                <button onclick="clearCart()" class="text-xs text-rose-600 hover:text-rose-700 font-medium">Clear All</button>
+                            </div>
+                            <div class="flex-grow p-4 overflow-y-auto divide-y divide-slate-100">
+                                ${state.cart.length === 0 ? `
+                                    <div class="h-48 flex flex-col items-center justify-center text-slate-400 gap-2">
+                                        <i class="fa-solid fa-cart-flatbed text-4xl"></i>
+                                        <p class="text-sm">Cart is currently empty</p>
+                                    </div>
+                                ` : state.cart.map(item => `
+                                    <div class="py-3 flex items-center justify-between gap-3">
+                                        <div class="flex-grow">
+                                            <h4 class="text-sm font-semibold text-slate-800">${item.name}</h4>
+                                            <span class="text-xs text-slate-500">${state.settings.currency} ${item.price.toLocaleString()} each</span>
+                                        </div>
+                                        <div class="flex items-center gap-2">
+                                            <button onclick="updateQty('${item.id}', -1)" class="w-7 h-7 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-md font-bold text-xs flex items-center justify-center">-</button>
+                                            <span class="text-sm font-bold w-6 text-center">${item.qty}</span>
+                                            <button onclick="updateQty('${item.id}', 1)" class="w-7 h-7 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-md font-bold text-xs flex items-center justify-center">+</button>
+                                        </div>
+                                        <div class="text-right min-w-[70px]">
+                                            <span class="text-sm font-bold text-slate-900">${state.settings.currency} ${(item.price * item.qty).toLocaleString()}</span>
+                                        </div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                            <div class="p-4 border-t border-slate-200 bg-slate-50 rounded-b-xl space-y-3">
+                                <div class="space-y-1.5 text-xs text-slate-600">
+                                    <div class="flex justify-between">
+                                        <span>Subtotal</span>
+                                        <span class="font-semibold text-slate-800">${state.settings.currency} ${cartTotal.toLocaleString()}</span>
+                                    </div>
+                                    ${state.settings.taxRate > 0 ? `
+                                        <div class="flex justify-between">
+                                            <span>Tax (${state.settings.taxRate}%)</span>
+                                            <span class="font-semibold text-slate-800">${state.settings.currency} ${cartTax.toLocaleString()}</span>
+                                        </div>
+                                    ` : ''}
+                                    <div class="flex justify-between text-base font-bold text-slate-900 pt-2 border-t border-slate-200">
+                                        <span>Total Amount</span>
+                                        <span class="text-blue-600">${state.settings.currency} ${grandTotal.toLocaleString()}</span>
+                                    </div>
+                                </div>
+                                <button onclick="checkout()" ${state.cart.length === 0 ? 'disabled' : ''}
+                                    class="w-full py-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-bold rounded-xl shadow-md transition-all text-sm flex items-center justify-center gap-2">
+                                    <i class="fa-solid fa-check"></i> Complete & Print Receipt
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderInventory() {
+            return `
+                <div class="space-y-6">
+                    <div class="flex justify-between items-center bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+                        <div>
+                            <h2 class="text-lg font-bold text-slate-800">Product Inventory Catalog</h2>
+                            <p class="text-xs text-slate-500">Manage stock, prices, and cost prices</p>
+                        </div>
+                        <button onclick="openProductModal()" class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg shadow-sm transition-all flex items-center gap-2">
+                            <i class="fa-solid fa-plus"></i> Add New Appliance
+                        </button>
+                    </div>
+                    <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-left text-sm">
+                                <thead class="bg-slate-50 border-b border-slate-200 text-xs font-bold text-slate-500 uppercase">
+                                    <tr>
+                                        <th class="p-4">Item Code</th>
+                                        <th class="p-4">Appliance Name</th>
+                                        <th class="p-4">Category</th>
+                                        <th class="p-4 text-right">Cost Price</th>
+                                        <th class="p-4 text-right">Selling Price</th>
+                                        <th class="p-4 text-center">Stock Level</th>
+                                        <th class="p-4 text-center">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-slate-100">
+                                    ${state.products.map(p => `
+                                        <tr class="hover:bg-slate-50">
+                                            <td class="p-4 font-mono text-xs text-slate-500">${p.id}</td>
+                                            <td class="p-4 font-semibold text-slate-800">${p.name}</td>
+                                            <td class="p-4 text-xs font-medium text-slate-600">${p.category}</td>
+                                            <td class="p-4 text-right text-slate-600">${state.settings.currency} ${p.cost.toLocaleString()}</td>
+                                            <td class="p-4 text-right font-bold text-slate-900">${state.settings.currency} ${p.price.toLocaleString()}</td>
+                                            <td class="p-4 text-center">
+                                                <span class="px-2.5 py-1 rounded-full text-xs font-semibold ${p.stock <= p.minStock ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'}">
+                                                    ${p.stock} units
+                                                </span>
+                                            </td>
+                                            <td class="p-4 text-center">
+                                                <div class="flex items-center justify-center gap-2">
+                                                    <button onclick="editProduct('${p.id}')" class="text-blue-600 hover:text-blue-800 p-1.5 rounded-md hover:bg-blue-50"><i class="fa-solid fa-pen-to-square"></i></button>
+                                                    <button onclick="deleteProduct('${p.id}')" class="text-rose-600 hover:text-rose-800 p-1.5 rounded-md hover:bg-rose-50"><i class="fa-solid fa-trash"></i></button>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    `).join('')}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderSales() {
+            const totalRevenue = state.sales.reduce((sum, s) => sum + s.total, 0);
+            const totalProfit = state.sales.reduce((sum, s) => sum + s.profit, 0);
+            const totalTransactions = state.sales.length;
+
+            return `
+                <div class="space-y-6">
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+                            <span class="text-xs font-bold text-slate-400 uppercase">Total Sales Revenue</span>
+                            <div class="text-2xl font-bold text-slate-900 mt-1">${state.settings.currency} ${totalRevenue.toLocaleString()}</div>
+                        </div>
+                        <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+                            <span class="text-xs font-bold text-slate-400 uppercase">Net Profit Generated</span>
+                            <div class="text-2xl font-bold text-emerald-600 mt-1">${state.settings.currency} ${totalProfit.toLocaleString()}</div>
+                        </div>
+                        <div class="bg-white p-5 rounded-xl border border-slate-200 shadow-sm">
+                            <span class="text-xs font-bold text-slate-400 uppercase">Total Completed Orders</span>
+                            <div class="text-2xl font-bold text-blue-600 mt-1">${totalTransactions} orders</div>
+                        </div>
+                    </div>
+
+                    <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                        <div class="p-4 border-b border-slate-200 font-bold text-slate-800">Transaction History Log</div>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-left text-sm">
+                                <thead class="bg-slate-50 border-b border-slate-200 text-xs font-bold text-slate-500 uppercase">
+                                    <tr>
+                                        <th class="p-4">Receipt ID</th>
+                                        <th class="p-4">Date & Time</th>
+                                        <th class="p-4">Items Sold</th>
+                                        <th class="p-4 text-right">Revenue Total</th>
+                                        <th class="p-4 text-right">Net Profit</th>
+                                        <th class="p-4 text-center">Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-slate-100">
+                                    ${state.sales.length === 0 ? `
+                                        <tr><td colspan="6" class="p-8 text-center text-slate-400">No completed sales records found</td></tr>
+                                    ` : state.sales.slice().reverse().map(s => `
+                                        <tr class="hover:bg-slate-50">
+                                            <td class="p-4 font-mono text-xs font-semibold text-blue-600">${s.id}</td>
+                                            <td class="p-4 text-xs text-slate-500">${new Date(s.date).toLocaleString()}</td>
+                                            <td class="p-4 text-xs text-slate-700">${s.items.map(i => `${i.name} (x${i.qty})`).join(', ')}</td>
+                                            <td class="p-4 text-right font-bold text-slate-900">${state.settings.currency} ${s.total.toLocaleString()}</td>
+                                            <td class="p-4 text-right font-bold text-emerald-600">${state.settings.currency} ${s.profit.toLocaleString()}</td>
+                                            <td class="p-4 text-center">
+                                                <button onclick="reprintReceipt('${s.id}')" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold px-3 py-1.5 rounded-lg transition-all">
+                                                    <i class="fa-solid fa-print"></i> Reprint
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    `).join('')}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderSettings() {
+            return `
+                <div class="bg-white max-w-2xl mx-auto rounded-xl border border-slate-200 shadow-sm p-6 space-y-6">
+                    <div>
+                        <h2 class="text-lg font-bold text-slate-900">Store Profile & Settings</h2>
+                        <p class="text-xs text-slate-500">Update company details displayed on receipts</p>
+                    </div>
+
+                    <form onsubmit="saveSettings(event)" class="space-y-4">
+                        <div>
+                            <label class="block text-xs font-semibold text-slate-600 uppercase mb-1">Store / Business Name</label>
+                            <input type="text" id="set-name" value="${state.settings.name}" required
+                                class="w-full px-4 py-2 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-600 text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold text-slate-600 uppercase mb-1">Business Address</label>
+                            <input type="text" id="set-address" value="${state.settings.address}" required
+                                class="w-full px-4 py-2 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-600 text-sm">
+                        </div>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-600 uppercase mb-1">Phone Number(s)</label>
+                                <input type="text" id="set-phone" value="${state.settings.phone}" required
+                                    class="w-full px-4 py-2 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-600 text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-xs font-semibold text-slate-600 uppercase mb-1">Currency Symbol</label>
+                                <input type="text" id="set-currency" value="${state.settings.currency}" required
+                                    class="w-full px-4 py-2 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-600 text-sm">
+                            </div>
+                        </div>
+                        <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm px-6 py-2.5 rounded-lg shadow-sm transition-all">
+                            Save Store Configuration
+                        </button>
+                    </form>
+                </div>
+            `;
+        }
+
+        function setLoginError(message) {
+            const errorElement = document.getElementById('login-error');
+            if (!errorElement) return;
+            errorElement.textContent = message;
+            errorElement.classList.remove('hidden');
+        }
+
+        async function handleLogin(e) {
+            e.preventDefault();
+            const config = window.AUTH0_CONFIG || {};
+            if (!state.auth0Client) {
+                setLoginError('Sign-in is not configured yet. Please contact the site administrator.');
+                return;
+            }
+            try {
+                await state.auth0Client.loginWithRedirect({
+                    authorizationParams: {
+                        redirect_uri: window.location.origin + window.location.pathname,
+                        audience: config.audience,
+                        login_hint: document.getElementById('username').value.trim()
+                    }
+                });
+            } catch (error) {
+                console.error('Auth0 sign-in could not start.', error);
+                setLoginError('Unable to start sign-in. Please try again.');
+            }
+        }
+
+        function decodeJwtPayload(token) {
+            const encoded = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+            const binary = atob(encoded);
+            const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
+            return JSON.parse(new TextDecoder().decode(bytes));
+        }
+
+        async function applyAuth0Session() {
+            const user = await state.auth0Client.getUser();
+            state.accessToken = await state.auth0Client.getTokenSilently();
+            const claims = decodeJwtPayload(state.accessToken);
+            const roles = Array.isArray(claims['https://treasurerock.com/roles'])
+                ? claims['https://treasurerock.com/roles']
+                : [];
+            state.role = roles.includes('admin') ? 'admin' : roles.includes('staff') ? 'staff' : 'user';
+            state.user = { name: user.name || user.nickname || user.email || user.sub, email: user.email };
+            state.authenticated = true;
+            state.activeTab = state.role === 'user' ? null : 'pos';
+            state.applications = [];
+            state.applicationsError = '';
+            render();
+            if (state.role === 'user') {
+                document.querySelector('#app main').innerHTML = `
+                    <section class="max-w-2xl mx-auto bg-white p-8 rounded-xl border border-slate-200 text-center">
+                        <h2 class="text-xl font-bold text-slate-900">Customer account</h2>
+                        <p class="mt-2 text-slate-600">Your account does not have access to the store dashboard. You can submit or follow up on an application with Treasure Rock staff.</p>
+                        <a href="apply.html" class="inline-block mt-5 bg-blue-600 hover:bg-blue-700 text-white font-semibold px-5 py-3 rounded-lg">Apply for Hire Purchase</a>
+                    </section>
+                `;
+            }
+            showToast(`Signed in as ${state.role}.`);
+        }
+
+        async function handleLogout() {
+            try {
+                await state.auth0Client.logout({
+                    logoutParams: { returnTo: window.location.origin + window.location.pathname }
+                });
+            } catch (error) {
+                console.error('Auth0 sign-out failed.', error);
+                showToast('Unable to sign out. Please try again.', 'error');
+            }
+        }
+
+        function setActiveTab(tab) {
+            const permittedTabs = state.role === 'admin'
+                ? ['pos', 'inventory', 'sales', 'settings', 'hire-purchase']
+                : state.role === 'staff'
+                    ? ['pos', 'inventory', 'sales', 'hire-purchase']
+                    : [];
+            if (!permittedTabs.includes(tab)) return;
+            state.activeTab = tab;
+            render();
+            if (tab === 'hire-purchase' && state.applications.length === 0 && !state.applicationsError) {
+                loadHirePurchaseApplications();
+            }
+        }
+
+        async function loadHirePurchaseApplications() {
+            state.applicationsLoading = true;
+            state.applicationsError = '';
+            render();
+            try {
+                if (!state.accessToken) throw new Error('Your session has expired. Please sign in again.');
+                const response = await fetch('/.netlify/functions/hire-purchase-applications', {
+                    headers: { Authorization: `Bearer ${state.accessToken}` }
+                });
+                if (!response.ok) {
+                    if (response.status === 401 || response.status === 403) {
+                        throw new Error('You are not authorized to view these applications.');
+                    }
+                    throw new Error('Unable to load applications. Please try again later.');
+                }
+                state.applications = await response.json();
+            } catch (error) {
+                console.error('Could not load hire purchase applications.', error);
+                state.applicationsError = error.message || 'Unable to load applications. Please try again later.';
+            } finally {
+                state.applicationsLoading = false;
+                if (state.authenticated && state.activeTab === 'hire-purchase') render();
+            }
+        }
+
+        function updateSearch(val) {
+            state.searchQuery = val;
+            const searchInput = document.getElementById('product-search');
+            if (searchInput) {
+                const selectionStart = searchInput.selectionStart;
+                const selectionEnd = searchInput.selectionEnd;
+                render();
+                const updatedSearchInput = document.getElementById('product-search');
+                if (updatedSearchInput) {
+                    updatedSearchInput.focus();
+                    updatedSearchInput.setSelectionRange(selectionStart, selectionEnd);
+                }
+            }
+        }
+
+        function updateCategory(val) {
+            state.categoryFilter = val;
+            render();
+        }
+
+        function addToCart(productId) {
+            const product = state.products.find(p => p.id === productId);
+            if (!product) return;
+            if (product.stock <= 0) {
+                showToast('Item is out of stock!', 'error');
+                return;
+            }
+            const existing = state.cart.find(item => item.id === productId);
+            if (existing) {
+                if (existing.qty + 1 > product.stock) {
+                    showToast('Cannot add more than available stock', 'error');
+                    return;
+                }
+                existing.qty += 1;
+            } else {
+                state.cart.push({ ...product, qty: 1 });
+            }
+            render();
+        }
+
+        function updateQty(productId, delta) {
+            const item = state.cart.find(i => i.id === productId);
+            const product = state.products.find(p => p.id === productId);
+            if (item) {
+                if (delta > 0 && item.qty + delta > product.stock) {
+                    showToast('Stock limit reached', 'error');
+                    return;
+                }
+                item.qty += delta;
+                if (item.qty <= 0) {
+                    state.cart = state.cart.filter(i => i.id !== productId);
+                }
+            }
+            render();
+        }
+
+        function clearCart() {
+            state.cart = [];
+            render();
+        }
+
+        function checkout() {
+            if (state.cart.length === 0) return;
+            const saleItems = state.cart.map(item => {
+                const product = state.products.find(p => p.id === item.id);
+                return product ? { ...product, qty: item.qty } : null;
+            });
+            if (saleItems.some(item => !item || item.qty > item.stock)) {
+                showToast('Cart stock changed. Update the cart before checkout.', 'error');
+                return;
+            }
+            const total = saleItems.reduce((sum, item) => sum + (item.price * item.qty), 0);
+            const totalCost = saleItems.reduce((sum, item) => sum + (item.cost * item.qty), 0);
+            const profit = total - totalCost;
+            const sale = {
+                id: 'REC-' + Date.now().toString().slice(-6),
+                date: new Date().toISOString(),
+                items: saleItems,
+                total: total,
+                profit: profit
+            };
+            saleItems.forEach(item => {
+                const prod = state.products.find(p => p.id === item.id);
+                prod.stock -= item.qty;
+            });
+            state.sales.push(sale);
+            saveState();
+            printThermalReceipt(sale);
+            state.cart = [];
+            showToast('Sale completed successfully!');
+            render();
+        }
+
+        function printThermalReceipt(sale) {
+            const printable = document.getElementById('printable-receipt');
+            printable.innerHTML = `
+                <div style="text-align: center; margin-bottom: 10px;">
+                    <h2 style="font-size: 14px; font-weight: bold;">${state.settings.name}</h2>
+                    <p>${state.settings.address}</p>
+                    <p>Tel: ${state.settings.phone}</p>
+                    <p>--------------------------------</p>
+                    <p><strong>RECEIPT: ${sale.id}</strong></p>
+                    <p>Date: ${new Date(sale.date).toLocaleString()}</p>
+                    <p>--------------------------------</p>
+                </div>
+                <table style="width: 100%; font-size: 11px; text-align: left;">
+                    <thead>
+                        <tr>
+                            <th>Item</th>
+                            <th style="text-align:center;">Qty</th>
+                            <th style="text-align:right;">Total</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${sale.items.map(i => `
+                            <tr>
+                                <td>${i.name}</td>
+                                <td style="text-align:center;">${i.qty}</td>
+                                <td style="text-align:right;">${(i.price * i.qty).toLocaleString()}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+                <div style="text-align: right; margin-top: 10px;">
+                    <p>--------------------------------</p>
+                    <p style="font-size: 13px; font-weight: bold;">GRAND TOTAL: ${state.settings.currency} ${sale.total.toLocaleString()}</p>
+                    <p>--------------------------------</p>
+                </div>
+                <div style="text-align: center; margin-top: 15px;">
+                    <p>Thank you for your patronage!</p>
+                    <p>Appliance Warranty Validated with Receipt</p>
+                </div>
+            `;
+            printable.classList.remove('hidden');
+            window.print();
+            printable.classList.add('hidden');
+        }
+
+        function reprintReceipt(saleId) {
+            const sale = state.sales.find(s => s.id === saleId);
+            if (sale) printThermalReceipt(sale);
+        }
+
+        function openProductModal(productId = null) {
+            const prod = productId ? state.products.find(p => p.id === productId) : null;
+            const name = prompt('Product Name:', prod ? prod.name : '');
+            if (name === null || !name.trim()) return;
+            const category = prompt('Category:', prod ? prod.category : 'General');
+            if (category === null || !category.trim()) return;
+            const priceInput = prompt('Selling Price:', prod ? prod.price : '0');
+            if (priceInput === null) return;
+            const price = Number(priceInput);
+            const costInput = prompt('Cost Price:', prod ? prod.cost : '0');
+            if (costInput === null) return;
+            const cost = Number(costInput);
+            const stockInput = prompt('Stock Quantity:', prod ? prod.stock : '0');
+            if (stockInput === null) return;
+            const stock = Number(stockInput);
+            if (!Number.isFinite(price) || price < 0 || !Number.isFinite(cost) || cost < 0 || !Number.isInteger(stock) || stock < 0) {
+                showToast('Enter valid non-negative prices and a whole-number stock quantity.', 'error');
+                return;
+            }
+            if (prod) {
+                prod.name = name.trim();
+                prod.category = category.trim();
+                prod.price = price;
+                prod.cost = cost;
+                prod.stock = stock;
+                showToast('Product updated successfully');
+            } else {
+                const nextProductNumber = state.products.reduce((max, product) => {
+                    const match = /^PROD-(\d+)$/.exec(product.id);
+                    return match ? Math.max(max, Number(match[1])) : max;
+                }, 100) + 1;
+                state.products.push({
+                    id: 'PROD-' + nextProductNumber,
+                    name: name.trim(), category: category.trim(), price, cost, stock, minStock: 2
+                });
+                showToast('New appliance created');
+            }
+            saveState();
+            render();
+        }
+
+        function editProduct(id) {
+            openProductModal(id);
+        }
+
+        function deleteProduct(id) {
+            if (confirm('Are you sure you want to delete this appliance?')) {
+                state.products = state.products.filter(p => p.id !== id);
+                state.cart = state.cart.filter(item => item.id !== id);
+                saveState();
+                showToast('Product deleted');
+                render();
+            }
+        }
+
+        function saveSettings(e) {
+            e.preventDefault();
+            state.settings.name = document.getElementById('set-name').value;
+            state.settings.address = document.getElementById('set-address').value;
+            state.settings.phone = document.getElementById('set-phone').value;
+            state.settings.currency = document.getElementById('set-currency').value;
+            saveState();
+            showToast('Settings saved successfully');
+            render();
+        }
+
+        window.onload = function() {
+            render();
+            (async () => {
+                const config = window.AUTH0_CONFIG || {};
+                if (!config.domain || !config.clientId || !config.audience) {
+                    setLoginError('Auth0 is not configured. Add the domain, client ID, and API audience in auth-config.js.');
+                    return;
+                }
+                try {
+                    state.auth0Client = await window.auth0.createAuth0Client({
+                        domain: config.domain,
+                        clientId: config.clientId,
+                        authorizationParams: {
+                            redirect_uri: window.location.origin + window.location.pathname,
+                            audience: config.audience
+                        },
+                        cacheLocation: 'memory'
+                    });
+                    const params = new URLSearchParams(window.location.search);
+                    if (params.has('code') && params.has('state')) {
+                        await state.auth0Client.handleRedirectCallback();
+                        window.history.replaceState({}, document.title, window.location.pathname);
+                    }
+                    if (await state.auth0Client.isAuthenticated()) {
+                        await applyAuth0Session();
+                    }
+                } catch (error) {
+                    console.error('Auth0 initialization failed.', error);
+                    setLoginError('Sign-in could not be initialized. Check the Auth0 configuration and try again.');
+                }
+            })();
+        };
+    </script>
+</body>
+</html>
